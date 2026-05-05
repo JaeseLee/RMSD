@@ -312,6 +312,9 @@ parser.add_argument('--date_out', type=str, default=time.strftime('%y%m%d %H_%M_
 parser.add_argument('--rootpath', type=str, default='/Users/jslee/Downloads/SEN12FLOOD/', help='root path that contains processed/ and output/')
 parser.add_argument('--vis_interval', type=int, default=1, help='save validation visualization every N epochs; set 0 to disable interval saves')
 parser.add_argument('--vis_sample_idx', type=int, default=0, help='sample index in the first validation batch to visualize')
+parser.add_argument('--kl_weight', type=float, default=0.01, help='weight for auxiliary channel-wise histogram KL loss')
+parser.add_argument('--kl_bins', type=int, default=32, help='number of bins for auxiliary histogram KL loss')
+parser.add_argument('--kl_sigma', type=float, default=0.03, help='soft histogram bin width for auxiliary KL loss')
         
 if __name__ == "__main__":
     config_run, _ = parser.parse_known_args()
@@ -419,6 +422,50 @@ def get_masked_loss(name):
 
     return masked_loss
 
+def soft_histogram_kl_loss(pred, target, mask, bins=32, sigma=0.03, value_range=(0.0, 1.0), eps=1e-6):
+    """
+    채널별 soft histogram 분포를 맞추는 보조 KL loss.
+    pred/target은 정규화된 0-1 값을 가정한다.
+    """
+    mask = mask.to(dtype=torch.bool, device=pred.device)
+    bin_centers = torch.linspace(
+        value_range[0],
+        value_range[1],
+        bins,
+        device=pred.device,
+        dtype=pred.dtype,
+    )
+
+    kl_losses = []
+    for ch in range(pred.shape[1]):
+        ch_mask = mask[:, ch]
+        if not torch.any(ch_mask):
+            continue
+
+        pred_vals = pred[:, ch][ch_mask].reshape(-1, 1).clamp(value_range[0], value_range[1])
+        target_vals = target[:, ch][ch_mask].reshape(-1, 1).clamp(value_range[0], value_range[1])
+
+        pred_weights = torch.exp(-0.5 * ((pred_vals - bin_centers) / sigma) ** 2)
+        target_weights = torch.exp(-0.5 * ((target_vals - bin_centers) / sigma) ** 2)
+
+        pred_hist = pred_weights.sum(dim=0)
+        target_hist = target_weights.sum(dim=0)
+
+        pred_prob = pred_hist / (pred_hist.sum() + eps)
+        target_prob = target_hist / (target_hist.sum() + eps)
+
+        kl_losses.append(
+            F.kl_div(
+                torch.log(pred_prob + eps),
+                target_prob,
+                reduction="sum",
+            )
+        )
+
+    if len(kl_losses) == 0:
+        return pred.sum() * 0.0
+    return torch.stack(kl_losses).mean()
+
 def plot_validation_grid(X, Y_true, Y_pred, X_pred, X_mask, Y_mask, save_path, epoch, sample_idx=0):
     X_true = X.detach().cpu().numpy()
     Y_true = Y_true.detach().cpu().numpy()
@@ -473,9 +520,11 @@ def save_loss_history(history, save_dir):
                 "train_loss",
                 "train_xy_loss",
                 "train_yx_loss",
+                "train_kl_loss",
                 "val_loss",
                 "val_xy_loss",
                 "val_yx_loss",
+                "val_kl_loss",
                 "best_val_loss",
             ],
         )
@@ -631,6 +680,7 @@ for epoch in range(config.num_epochs):
     trn_losses = []
     trn_xy_losses = []
     trn_yx_losses = []
+    trn_kl_losses = []
 
     for Xb, Yb, MXb, MYb in tqdm(loader_trn, desc=f"Epoch {epoch+1}/{config.num_epochs} train"):
         Xb = Xb.to(device)
@@ -644,7 +694,10 @@ for epoch in range(config.num_epochs):
         pred_x = model_yx(Yb)
         loss_xy = criterion(pred_y, Yb, MYb)
         loss_yx = criterion(pred_x, Xb, MXb)
-        loss = loss_xy + loss_yx
+        kl_xy = soft_histogram_kl_loss(pred_y, Yb, MYb, bins=config.kl_bins, sigma=config.kl_sigma)
+        kl_yx = soft_histogram_kl_loss(pred_x, Xb, MXb, bins=config.kl_bins, sigma=config.kl_sigma)
+        kl_loss = kl_xy + kl_yx
+        loss = loss_xy + loss_yx + config.kl_weight * kl_loss
 
         loss.backward()
         optimizer.step()
@@ -652,10 +705,12 @@ for epoch in range(config.num_epochs):
         trn_losses.append(loss.item())
         trn_xy_losses.append(loss_xy.item())
         trn_yx_losses.append(loss_yx.item())
+        trn_kl_losses.append(kl_loss.item())
 
     trn_loss = np.mean(trn_losses)
     trn_xy_loss = np.mean(trn_xy_losses)
     trn_yx_loss = np.mean(trn_yx_losses)
+    trn_kl_loss = np.mean(trn_kl_losses)
     loss_arr.append(trn_loss)
 
     # -------------------------------------------------
@@ -666,6 +721,7 @@ for epoch in range(config.num_epochs):
     val_losses = []
     val_xy_losses = []
     val_yx_losses = []
+    val_kl_losses = []
     val_vis_batch = None
 
     with torch.no_grad():
@@ -679,11 +735,15 @@ for epoch in range(config.num_epochs):
             pred_x = model_yx(Yb)
             loss_xy = criterion(pred_y, Yb, MYb)
             loss_yx = criterion(pred_x, Xb, MXb)
-            loss = loss_xy + loss_yx
+            kl_xy = soft_histogram_kl_loss(pred_y, Yb, MYb, bins=config.kl_bins, sigma=config.kl_sigma)
+            kl_yx = soft_histogram_kl_loss(pred_x, Xb, MXb, bins=config.kl_bins, sigma=config.kl_sigma)
+            kl_loss = kl_xy + kl_yx
+            loss = loss_xy + loss_yx + config.kl_weight * kl_loss
 
             val_losses.append(loss.item())
             val_xy_losses.append(loss_xy.item())
             val_yx_losses.append(loss_yx.item())
+            val_kl_losses.append(kl_loss.item())
             if val_vis_batch is None:
                 val_vis_batch = (
                     Xb.detach().cpu(),
@@ -697,14 +757,15 @@ for epoch in range(config.num_epochs):
     val_loss = np.mean(val_losses)
     val_xy_loss = np.mean(val_xy_losses)
     val_yx_loss = np.mean(val_yx_losses)
+    val_kl_loss = np.mean(val_kl_losses)
     loss_arr_val.append(val_loss)
 
     print(
         f"Epoch {epoch+1:03d}/{config.num_epochs} | "
         f"train loss = {trn_loss:.5f} "
-        f"(xy = {trn_xy_loss:.5f}, yx = {trn_yx_loss:.5f}) | "
+        f"(xy = {trn_xy_loss:.5f}, yx = {trn_yx_loss:.5f}, kl = {trn_kl_loss:.5f}) | "
         f"val loss = {val_loss:.5f} "
-        f"(xy = {val_xy_loss:.5f}, yx = {val_yx_loss:.5f})"
+        f"(xy = {val_xy_loss:.5f}, yx = {val_yx_loss:.5f}, kl = {val_kl_loss:.5f})"
     )
 
     is_best = val_loss < best_val_loss
@@ -715,9 +776,11 @@ for epoch in range(config.num_epochs):
             "train_loss": float(trn_loss),
             "train_xy_loss": float(trn_xy_loss),
             "train_yx_loss": float(trn_yx_loss),
+            "train_kl_loss": float(trn_kl_loss),
             "val_loss": float(val_loss),
             "val_xy_loss": float(val_xy_loss),
             "val_yx_loss": float(val_yx_loss),
+            "val_kl_loss": float(val_kl_loss),
             "best_val_loss": float(current_best_val_loss),
         }
     )
@@ -751,9 +814,11 @@ for epoch in range(config.num_epochs):
                 "train_loss": trn_loss,
                 "train_xy_loss": trn_xy_loss,
                 "train_yx_loss": trn_yx_loss,
+                "train_kl_loss": trn_kl_loss,
                 "val_loss": val_loss,
                 "val_xy_loss": val_xy_loss,
                 "val_yx_loss": val_yx_loss,
+                "val_kl_loss": val_kl_loss,
                 "X_min": X_trn_min,
                 "X_max": X_trn_max,
                 "Y_min": Y_trn_min,
