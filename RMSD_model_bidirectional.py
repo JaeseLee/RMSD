@@ -571,8 +571,10 @@ X_tst_3sig = mask_outside_nsigma(X_tst, X_trn_mean, X_trn_std, nsigma=5)
 Y_trn_3sig = mask_outside_nsigma(Y_trn, Y_trn_mean, Y_trn_std, nsigma=5)
 Y_tst_3sig = mask_outside_nsigma(Y_tst, Y_trn_mean, Y_trn_std, nsigma=5)
 
-X_trn_min, X_trn_max = np.nanmin(X_trn_3sig, axis = (0,2,3,)),np.nanmax(X_trn_3sig, axis =(0,2,3,))
-Y_trn_min, Y_trn_max = np.nanmin(Y_trn_3sig, axis = (0,2,3,)),np.nanmax(Y_trn_3sig, axis =(0,2,3,))
+X_trn_min = np.nanpercentile(X_trn_3sig, 1, axis=(0, 2, 3))
+X_trn_max = np.nanpercentile(X_trn_3sig, 99, axis=(0, 2, 3))
+Y_trn_min = np.nanpercentile(Y_trn_3sig, 1, axis=(0, 2, 3))
+Y_trn_max = np.nanpercentile(Y_trn_3sig, 99, axis=(0, 2, 3))
 
 # min-max scaling to (0, 1)
 X_min_reshaped = X_trn_min[:, np.newaxis, np.newaxis]
@@ -587,6 +589,11 @@ X_trn_arr_norm = (X_trn_3sig - X_min_reshaped) / X_range_reshaped
 X_tst_arr_norm = (X_tst_3sig - X_min_reshaped) / X_range_reshaped
 Y_trn_arr_norm = (Y_trn_3sig - Y_min_reshaped) / Y_range_reshaped
 Y_tst_arr_norm = (Y_tst_3sig - Y_min_reshaped) / Y_range_reshaped
+
+X_trn_arr_norm = np.clip(X_trn_arr_norm, 0.0, 1.0)
+X_tst_arr_norm = np.clip(X_tst_arr_norm, 0.0, 1.0)
+Y_trn_arr_norm = np.clip(Y_trn_arr_norm, 0.0, 1.0)
+Y_tst_arr_norm = np.clip(Y_tst_arr_norm, 0.0, 1.0)
 
 # ==============================================================================
 # Split data into Trn / Val / Tst
