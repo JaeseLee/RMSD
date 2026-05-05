@@ -362,9 +362,9 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(config.seed)
 
 X_trn = np.load(os.path.join(data_dir, 'trn_X_VV_VH_RVI_raw.npy'))
-Y_trn = np.load(os.path.join(data_dir, 'trn_Y_NDVI_MNDWI_NBR_raw.npy'))
+Y_trn = np.load(os.path.join(data_dir, 'trn_Y_MNDWI_NDVI_NDWI_raw.npy'))
 X_tst = np.load(os.path.join(data_dir, 'tst_X_VV_VH_RVI_raw.npy'))
-Y_tst = np.load(os.path.join(data_dir, 'tst_Y_NDVI_MNDWI_NBR_raw.npy'))
+Y_tst = np.load(os.path.join(data_dir, 'tst_Y_MNDWI_NDVI_NDWI_raw.npy'))
 
 def mask_outside_nsigma(arr, mean, std, nsigma=3.0, copy=True):
     """
@@ -443,8 +443,8 @@ def plot_validation_grid(X, Y_true, Y_pred, X_pred, X_mask, Y_mask, save_path, e
     rows = [
         ("X_true", X_true_sample, ["VV", "VH", "RVI"]),
         ("X_pred (Y->X)", X_pred_sample, ["VV", "VH", "RVI"]),
-        ("Y_true", Y_true_sample, ["NDVI", "MNDWI", "NBR"]),
-        ("Y_pred (X->Y)", Y_pred_sample, ["NDVI", "MNDWI", "NBR"]),
+        ("Y_true", Y_true_sample, ["MNDWI", "NDVI", "NDWI"]),
+        ("Y_pred (X->Y)", Y_pred_sample, ["MNDWI", "NDVI", "NDWI"]),
     ]
 
     fig, axes = plt.subplots(4, 3, figsize=(11, 12), dpi=180, constrained_layout=True)

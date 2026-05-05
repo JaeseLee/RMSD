@@ -110,9 +110,14 @@ def estimate_cloud_fraction(
 
     return np.sum(cloud_like) / np.sum(valid), valid_fraction
 
+def norm_diff(a, b):
+    out = (a - b) / (a + b)
+    out[~np.isfinite(out)] = np.nan
+    return out
+
 def build_matched_df_one_folder(folder):
     """
-    한 scene folder 안에서 동일 날짜의 S1 VV/VH와 S2 B02/B03/B04/B08/B11/B12를 매칭.
+    한 scene folder 안에서 동일 날짜의 S1 VV/VH와 S2 B02/B03/B04/B08/B11를 매칭.
     """
 
     VVs = sorted(g.glob(os.path.join(folder, '*VV*.tif')))
@@ -123,7 +128,6 @@ def build_matched_df_one_folder(folder):
     Bs = sorted(g.glob(os.path.join(folder, '*B02*.tif')))
     Nirs = sorted(g.glob(os.path.join(folder, '*B08*.tif')))
     B11s = sorted(g.glob(os.path.join(folder, '*B11*.tif')))
-    B12s = sorted(g.glob(os.path.join(folder, '*B12*.tif')))
 
     # -----------------------------
     # S1 dataframe
@@ -168,18 +172,12 @@ def build_matched_df_one_folder(folder):
         'date': [parse_s2_date(f) for f in B11s]
     })
 
-    df_b12 = pd.DataFrame({
-        'B12': B12s,
-        'date': [parse_s2_date(f) for f in B12s]
-    })
-
     df_s2 = (
         df_r
         .merge(df_g, on='date', how='inner')
         .merge(df_b, on='date', how='inner')
         .merge(df_nir, on='date', how='inner')
         .merge(df_b11, on='date', how='inner')
-        .merge(df_b12, on='date', how='inner')
     )
 
     # -----------------------------
@@ -239,7 +237,7 @@ def make_xy_from_matched_df(
 ):
     """
     X: [VV, VH, RVI]
-    Y: [NDVI, MNDWI, NBR]
+    Y: [MNDWI, NDVI, NDWI]
 
     Returns
     -------
@@ -285,10 +283,9 @@ def make_xy_from_matched_df(
             R = read_tif(row["R"]) / optical_scale
             Nir = read_reproject_to_match(row["Nir"], match_path, resampling=Resampling.bilinear) / optical_scale
             B11 = read_reproject_to_match(row["B11"], match_path, resampling=Resampling.bilinear) / optical_scale
-            B12 = read_reproject_to_match(row["B12"], match_path, resampling=Resampling.bilinear) / optical_scale
 
             # shape 체크
-            shapes = [VV.shape, VH.shape, B.shape, G.shape, R.shape, Nir.shape, B11.shape, B12.shape]
+            shapes = [VV.shape, VH.shape, B.shape, G.shape, R.shape, Nir.shape, B11.shape]
 
             if len(set(shapes)) != 1:
                 bad_rows.append((i, row["folder"], row["date"], "shape mismatch", shapes))
@@ -354,17 +351,14 @@ def make_xy_from_matched_df(
             RVI = (4.0 * VH_for_rvi) / (VV_for_rvi + VH_for_rvi)
 
             # Optical indices 계산
-            NDVI = (Nir - R) / (Nir + R)
-            MNDWI = (G - B11) / (G + B11)
-            NBR = (Nir - B12) / (Nir + B12)
+            MNDWI = norm_diff(G, B11)
+            NDVI = norm_diff(Nir, R)
+            NDWI = norm_diff(G, Nir)
 
             RVI[~np.isfinite(RVI)] = np.nan
-            NDVI[~np.isfinite(NDVI)] = np.nan
-            MNDWI[~np.isfinite(MNDWI)] = np.nan
-            NBR[~np.isfinite(NBR)] = np.nan
 
             X = np.stack([VV, VH, RVI], axis=0).astype(np.float32)
-            Y = np.stack([NDVI, MNDWI, NBR], axis=0).astype(np.float32)
+            Y = np.stack([MNDWI, NDVI, NDWI], axis=0).astype(np.float32)
 
             X_list.append(X)
             Y_list.append(Y)
@@ -476,7 +470,7 @@ def process_split(
     )
 
     np.save(
-        os.path.join(out_dir, f"{split_name}_Y_NDVI_MNDWI_NBR_raw.npy"),
+        os.path.join(out_dir, f"{split_name}_Y_MNDWI_NDVI_NDWI_raw.npy"),
         Y_arr
     )
 
