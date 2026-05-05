@@ -1,0 +1,27 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+
+# Data and model artifacts
+*.npy
+*.npz
+*.tif
+*.tiff
+*.pt
+*.pth
+*.ckpt
+outputs/
+processed/
+output/
+validation_figures/
+
+# Notebook and editor noise
+.ipynb_checkpoints/
+.vscode/
+.idea/
