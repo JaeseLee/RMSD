@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
 
+from rmsd_light_model import LightAttentionUNet, masked_gradient_loss, masked_ssim_loss
+
 def add_metrics(x, y, ax=None, s=0, show_corr=True, show_ubRMSD=True, show_bias=True, show_line_eq=True, 
                 corner='top-right', color='black', alpha=0.7, fontsize = 8, vminmax=None, fontcolor = None):
     """
@@ -271,7 +273,8 @@ def save_config(args, save_dir='.'):
     
     # 3. 파일명 생성 (예: config_20250101_12_00_00.json)
     # date_out이 있으면 파일명에 포함시켜 구분을 쉽게 함
-    file_name = f"config_{config_dict.get('date_out', 'experiment')}.json"
+    experiment_name = os.path.basename(str(config_dict.get('date_out', 'experiment')).rstrip(os.sep))
+    file_name = f"config_{experiment_name}.json"
     file_path = os.path.join(save_dir, file_name)
     
     # 4. JSON 파일로 저장
@@ -315,6 +318,18 @@ parser.add_argument('--vis_sample_idx', type=int, default=0, help='sample index 
 parser.add_argument('--kl_weight', type=float, default=0.01, help='weight for auxiliary channel-wise histogram KL loss')
 parser.add_argument('--kl_bins', type=int, default=32, help='number of bins for auxiliary histogram KL loss')
 parser.add_argument('--kl_sigma', type=float, default=0.03, help='soft histogram bin width for auxiliary KL loss')
+parser.add_argument('--model', choices=['light_attention', 'unet'], default='light_attention', help='model architecture')
+parser.add_argument('--base_channels', type=int, default=32, help='base width of light_attention model')
+parser.add_argument('--arch_use_depthwise', type=str2bool, default=True, help='use depthwise-separable convolutions')
+parser.add_argument('--arch_use_residual', type=str2bool, default=True, help='use residual block connections')
+parser.add_argument('--arch_use_eca', type=str2bool, default=True, help='use ECA channel attention')
+parser.add_argument('--arch_use_skip_attention', type=str2bool, default=True, help='use attention gates on deep skips')
+parser.add_argument('--arch_bottleneck_dilation', type=int, default=2, help='light model bottleneck dilation')
+parser.add_argument('--arch_norm', choices=['group', 'batch'], default='group', help='light model normalization')
+parser.add_argument('--arch_activation', choices=['silu', 'relu6'], default='silu', help='light model activation')
+parser.add_argument('--cycle_weight', type=float, default=0.0, help='X->Y->X and Y->X->Y consistency weight')
+parser.add_argument('--gradient_weight', type=float, default=0.0, help='spatial gradient preservation weight')
+parser.add_argument('--ssim_weight', type=float, default=0.0, help='local structural similarity loss weight')
         
 if __name__ == "__main__":
     config_run, _ = parser.parse_known_args()
@@ -661,8 +676,28 @@ loader_val = DataLoader(
 # ==============================================================================
 # Model
 # ==============================================================================
-model_xy = UNet(n_channels=3, n_classes=3, bilinear=True).to(device)
-model_yx = UNet(n_channels=3, n_classes=3, bilinear=True).to(device)
+def build_model():
+    if config.model == 'light_attention':
+        return LightAttentionUNet(
+            n_channels=3,
+            n_classes=3,
+            base_channels=config.base_channels,
+            dropout=config.do,
+            use_depthwise=config.arch_use_depthwise,
+            use_residual=config.arch_use_residual,
+            use_eca=config.arch_use_eca,
+            use_skip_attention=config.arch_use_skip_attention,
+            bottleneck_dilation=config.arch_bottleneck_dilation,
+            normalization=config.arch_norm,
+            activation=config.arch_activation,
+        )
+    return UNet(n_channels=3, n_classes=3, bilinear=True)
+
+
+model_xy = build_model().to(device)
+model_yx = build_model().to(device)
+print(f"Architecture: {config.model}")
+print(f"Parameters per direction: {sum(p.numel() for p in model_xy.parameters()):,}")
 
 optimizer_ = get_optimizer(config.optimizer)
 optimizer = optimizer_(
@@ -670,6 +705,70 @@ optimizer = optimizer_(
     lr=config.lr,
 )
 criterion = get_masked_loss(config.loss)
+
+
+def compute_bidirectional_loss(Xb, Yb, MXb, MYb):
+    """Compute only enabled loss terms so zero-weight ablations are actually faster."""
+    pred_y = model_xy(Xb)
+    pred_x = model_yx(Yb)
+    loss_xy = criterion(pred_y, Yb, MYb)
+    loss_yx = criterion(pred_x, Xb, MXb)
+    zero = pred_y.new_zeros(())
+
+    if config.kl_weight > 0:
+        kl_loss = (
+            soft_histogram_kl_loss(pred_y, Yb, MYb, bins=config.kl_bins, sigma=config.kl_sigma)
+            + soft_histogram_kl_loss(pred_x, Xb, MXb, bins=config.kl_bins, sigma=config.kl_sigma)
+        )
+    else:
+        kl_loss = zero
+
+    if config.gradient_weight > 0:
+        gradient_loss = (
+            masked_gradient_loss(pred_y, Yb, MYb)
+            + masked_gradient_loss(pred_x, Xb, MXb)
+        )
+    else:
+        gradient_loss = zero
+
+    if config.ssim_weight > 0:
+        ssim_loss = (
+            masked_ssim_loss(pred_y, Yb, MYb)
+            + masked_ssim_loss(pred_x, Xb, MXb)
+        )
+    else:
+        ssim_loss = zero
+
+    if config.cycle_weight > 0:
+        cycle_x = model_yx(pred_y)
+        cycle_y = model_xy(pred_x)
+        cycle_loss = criterion(cycle_x, Xb, MXb) + criterion(cycle_y, Yb, MYb)
+    else:
+        cycle_loss = zero
+
+    total_loss = (
+        loss_xy + loss_yx
+        + config.kl_weight * kl_loss
+        + config.cycle_weight * cycle_loss
+        + config.gradient_weight * gradient_loss
+        + config.ssim_weight * ssim_loss
+    )
+    components = {
+        "xy": loss_xy,
+        "yx": loss_yx,
+        "kl": kl_loss,
+        "cycle": cycle_loss,
+        "gradient": gradient_loss,
+        "ssim": ssim_loss,
+    }
+    return total_loss, pred_y, pred_x, components
+
+
+print(
+    "Loss configuration: "
+    f"direct={config.loss}, KL={config.kl_weight:g}, cycle={config.cycle_weight:g}, "
+    f"gradient={config.gradient_weight:g}, SSIM={config.ssim_weight:g}"
+)
 
 loss_arr = []
 loss_arr_val = []
@@ -697,22 +796,15 @@ for epoch in range(config.num_epochs):
 
         optimizer.zero_grad()
 
-        pred_y = model_xy(Xb)
-        pred_x = model_yx(Yb)
-        loss_xy = criterion(pred_y, Yb, MYb)
-        loss_yx = criterion(pred_x, Xb, MXb)
-        kl_xy = soft_histogram_kl_loss(pred_y, Yb, MYb, bins=config.kl_bins, sigma=config.kl_sigma)
-        kl_yx = soft_histogram_kl_loss(pred_x, Xb, MXb, bins=config.kl_bins, sigma=config.kl_sigma)
-        kl_loss = kl_xy + kl_yx
-        loss = loss_xy + loss_yx + config.kl_weight * kl_loss
+        loss, pred_y, pred_x, components = compute_bidirectional_loss(Xb, Yb, MXb, MYb)
 
         loss.backward()
         optimizer.step()
 
         trn_losses.append(loss.item())
-        trn_xy_losses.append(loss_xy.item())
-        trn_yx_losses.append(loss_yx.item())
-        trn_kl_losses.append(kl_loss.item())
+        trn_xy_losses.append(components["xy"].item())
+        trn_yx_losses.append(components["yx"].item())
+        trn_kl_losses.append(components["kl"].item())
 
     trn_loss = np.mean(trn_losses)
     trn_xy_loss = np.mean(trn_xy_losses)
@@ -738,19 +830,12 @@ for epoch in range(config.num_epochs):
             MXb = MXb.to(device)
             MYb = MYb.to(device)
 
-            pred_y = model_xy(Xb)
-            pred_x = model_yx(Yb)
-            loss_xy = criterion(pred_y, Yb, MYb)
-            loss_yx = criterion(pred_x, Xb, MXb)
-            kl_xy = soft_histogram_kl_loss(pred_y, Yb, MYb, bins=config.kl_bins, sigma=config.kl_sigma)
-            kl_yx = soft_histogram_kl_loss(pred_x, Xb, MXb, bins=config.kl_bins, sigma=config.kl_sigma)
-            kl_loss = kl_xy + kl_yx
-            loss = loss_xy + loss_yx + config.kl_weight * kl_loss
+            loss, pred_y, pred_x, components = compute_bidirectional_loss(Xb, Yb, MXb, MYb)
 
             val_losses.append(loss.item())
-            val_xy_losses.append(loss_xy.item())
-            val_yx_losses.append(loss_yx.item())
-            val_kl_losses.append(kl_loss.item())
+            val_xy_losses.append(components["xy"].item())
+            val_yx_losses.append(components["yx"].item())
+            val_kl_losses.append(components["kl"].item())
             if val_vis_batch is None:
                 val_vis_batch = (
                     Xb.detach().cpu(),

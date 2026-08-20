@@ -119,9 +119,9 @@ def lineartodb(sar):
 processed_data = "/Users/jslee/Downloads/SEN12FLOOD/processed/"
 
 X_trn = np.load(processed_data + 'trn_X_VV_VH_RVI_raw.npy')
-Y_trn = np.load(processed_data + 'trn_Y_R_Nir_NDVI_raw.npy')
+Y_trn = np.load(processed_data + 'trn_Y_MNDWI_NDVI_NDWI_raw.npy')
 X_tst = np.load(processed_data + 'tst_X_VV_VH_RVI_raw.npy')
-Y_tst = np.load(processed_data + 'tst_Y_R_Nir_NDVI_raw.npy')
+Y_tst = np.load(processed_data + 'tst_Y_MNDWI_NDVI_NDWI_raw.npy')
 
 df = pd.DataFrame({
     'VV':lineartodb(X_trn[:10,0].flatten()),
@@ -132,7 +132,7 @@ df = pd.DataFrame({
     'NDVI':Y_trn[:10,2].flatten(),
 }).dropna()
 
-i = -2
+i = -20
 plt.imshow(X_trn[i, 1], vmin=0, vmax = .1);plt.colorbar()
 plt.imshow(X_trn[i, 0], vmin=0, vmax = 1.);plt.colorbar()
 plt.imshow(Y_trn[i, 0], vmin=0, vmax = 1.);plt.colorbar()
